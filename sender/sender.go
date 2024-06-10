@@ -2,6 +2,7 @@ package sender
 
 import (
 	"github.com/golang/protobuf/proto"
+	log "github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
 )
 
@@ -22,26 +23,40 @@ func NewSender(connection *amqp.Connection) (*Sender, error) {
 	}, nil
 }
 
-func (s Sender) SendMessage(exchange, routingKey, kind string, mes proto.Message) error {
-	message, err := proto.Marshal(mes)
+func (s *Sender) SendMessage(exchange, routingKey string, mes proto.Message) {
+	messByte, err := proto.Marshal(mes)
 	if err != nil {
-		return err
+		log.Errorf("err, marshal message for send message. Error: %s", err)
 	}
 
-	err = s.Channel.ExchangeDeclare(
+	err = s.ExchangeDeclare(exchange)
+	if err != nil {
+		log.Errorf("err, exchange declare for send message. Error: %s", err)
+	}
+
+	err = s.Publish(exchange, routingKey, messByte)
+	if err != nil {
+		log.Errorf("err, publish message. Error: %s", err)
+	}
+
+}
+
+func (s *Sender) ExchangeDeclare(exchange string) error {
+	err := s.Channel.ExchangeDeclare(
 		exchange,
-		kind,
+		"topic", //TODO fix magic number
 		true,
 		false,
 		false,
 		false,
 		nil,
 	)
-	if err != nil {
-		return err
-	}
 
-	err = s.Channel.Publish(
+	return err
+}
+
+func (s *Sender) Publish(exchange, routingKey string, message []byte) error {
+	err := s.Channel.Publish(
 		exchange,
 		routingKey,
 		false,
