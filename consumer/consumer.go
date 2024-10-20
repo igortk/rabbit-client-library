@@ -3,13 +3,13 @@ package consumer
 import "github.com/streadway/amqp"
 
 type Consumer struct {
-	Connection  *amqp.Connection
-	Channel     *amqp.Channel
-	Queue       amqp.Queue
-	MessageChan chan []byte
+	connection  *amqp.Connection
+	channel     *amqp.Channel
+	queue       amqp.Queue
+	messageChan chan []byte
 }
 
-func NewConsumer(connection *amqp.Connection, exchange, routingKey, queueName string, ch chan []byte) (*Consumer, error) {
+func NewConsumer(connection *amqp.Connection, exchange, routingKey, queueName string) (*Consumer, error) {
 	channel, err := connection.Channel()
 	if err != nil {
 		return nil, err
@@ -41,16 +41,16 @@ func NewConsumer(connection *amqp.Connection, exchange, routingKey, queueName st
 	)
 
 	return &Consumer{
-		Connection:  connection,
-		Channel:     channel,
-		Queue:       queue,
-		MessageChan: ch,
+		connection:  connection,
+		channel:     channel,
+		queue:       queue,
+		messageChan: make(chan []byte),
 	}, nil
 }
 
 func (c *Consumer) ConsumeMessages() error {
-	mes, err := c.Channel.Consume(
-		c.Queue.Name,
+	mes, err := c.channel.Consume(
+		c.queue.Name,
 		"",
 		true,
 		false,
@@ -65,9 +65,13 @@ func (c *Consumer) ConsumeMessages() error {
 
 	go func() {
 		for d := range mes {
-			c.MessageChan <- d.Body
+			c.messageChan <- d.Body
 		}
 	}()
 
 	return nil
+}
+
+func (c *Consumer) GetMessageChan() chan []byte {
+	return c.messageChan
 }
