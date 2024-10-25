@@ -1,12 +1,20 @@
 package consumer
 
-import "github.com/streadway/amqp"
+import (
+	"errors"
+	"fmt"
+	"github.com/igortk/rabbit-client-library/common"
+	log "github.com/sirupsen/logrus"
+	"github.com/streadway/amqp"
+	"time"
+)
 
+// Consumer represents a RabbitMQ message consumer.
 type Consumer struct {
 	connection  *amqp.Connection
 	channel     *amqp.Channel
 	queue       amqp.Queue
-	messageChan chan []byte
+	messageChan chan []byte //Deprecated
 }
 
 func NewConsumer(connection *amqp.Connection, exchange, routingKey, queueName string) (*Consumer, error) {
@@ -14,62 +22,77 @@ func NewConsumer(connection *amqp.Connection, exchange, routingKey, queueName st
 	if err != nil {
 		return nil, err
 	}
-	err = channel.ExchangeDeclare(
-		exchange,
-		"topic",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	queue, err := channel.QueueDeclare(
-		queueName,
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
 
-	err = channel.QueueBind(
-		queue.Name,
-		routingKey,
-		exchange,
-		false,
-		nil,
-	)
-
-	return &Consumer{
+	consumer := &Consumer{
 		connection:  connection,
 		channel:     channel,
-		queue:       queue,
 		messageChan: make(chan []byte),
-	}, nil
+	}
+
+	if err := common.ExchangeDeclare(exchange, channel); err != nil {
+		return nil, err
+	}
+
+	if queue, err := common.QueueDeclare(queueName, channel); err == nil {
+		consumer.queue = queue
+	} else {
+		return nil, err
+	}
+
+	if err := common.QueueBind(queueName, routingKey, exchange, channel); err != nil {
+		return nil, err
+	}
+
+	return consumer, nil
 }
 
-func (c *Consumer) ConsumeMessages() error {
-	mes, err := c.channel.Consume(
-		c.queue.Name,
-		"",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-
+func (c *Consumer) ConsumeMessages(handler func([]byte) error) error {
+	dlv, err := common.ChannelConsume(c.queue.Name, c.channel)
 	if err != nil {
 		return err
 	}
 
 	go func() {
-		for d := range mes {
-			c.messageChan <- d.Body
+		for mes := range dlv {
+			if err := handler(mes.Body); err != nil {
+				log.Errorf(common.ErrHandlerMessage, err)
+			}
 		}
 	}()
 
 	return nil
+}
+
+func (c *Consumer) ConsumeWithCondition(
+	queueName, routingKey, exchange string,
+	duration time.Duration,
+	condition func([]byte) bool) ([]byte, error) {
+
+	if _, err := common.QueueDeclare(queueName, c.channel); err != nil {
+		return nil, err
+	}
+
+	if err := common.QueueBind(queueName, routingKey, exchange, c.channel); err != nil {
+		return nil, err
+	}
+
+	dlv, err := common.ChannelConsume(queueName, c.channel)
+	if err != nil {
+		return nil, err
+	}
+
+	timeoutChan := time.After(duration)
+
+	for {
+		select {
+		case msg := <-dlv:
+			if condition(msg.Body) {
+				return msg.Body, nil
+			}
+		case <-timeoutChan:
+			return nil, errors.New(fmt.Sprintf(common.TimeoutException, duration.Seconds()))
+		}
+	}
 }
 
 func (c *Consumer) GetMessageChan() chan []byte {
