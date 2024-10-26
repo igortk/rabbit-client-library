@@ -15,8 +15,14 @@ func TestInitConsumer(t *testing.T) {
 		"q.rabbit-client-library.test")
 	assert.NoError(t, err, "err is not nil")
 	assert.NotNil(t, consumer, "consumer is nil")
+	handler := func(body []byte) error {
+		fmt.Println("get message")
+		fmt.Println(body)
 
-	err = consumer.ConsumeMessages()
+		return nil
+	}
+
+	err = consumer.ConsumeMessages(handler)
 	forever := make(chan bool)
 	select {
 	case mess := <-consumer.GetMessageChan():
