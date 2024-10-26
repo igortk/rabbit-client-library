@@ -21,13 +21,14 @@ func TestInitConsumer(t *testing.T) {
 
 		return nil
 	}
-
-	err = consumer.ConsumeMessages(handler)
 	forever := make(chan bool)
-	select {
-	case mess := <-consumer.GetMessageChan():
-		fmt.Println("get message")
-		fmt.Println(mess)
-	}
+
+	go func() {
+		err = consumer.ConsumeMessages(handler)
+		if err != nil {
+			fmt.Print(err)
+		}
+	}()
+
 	<-forever
 }
