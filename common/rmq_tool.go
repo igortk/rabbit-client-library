@@ -2,6 +2,10 @@ package common
 
 import "github.com/streadway/amqp"
 
+func Connect(url string) (*amqp.Connection, error) {
+	return amqp.Dial(url)
+}
+
 func ExchangeDeclare(ex string, ch *amqp.Channel) error {
 	return ch.ExchangeDeclare(
 		ex,
