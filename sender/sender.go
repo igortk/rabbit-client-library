@@ -27,17 +27,14 @@ func NewSender(connection *amqp.Connection) (*Sender, error) {
 func (s *Sender) SendMessage(exchange, routingKey string, mes proto.Message) {
 	messByte, err := proto.Marshal(mes)
 	if err != nil {
-		log.Errorf("err, marshal message for send message. Error: %s", err)
+		log.Errorf(common.ErrMarshal, err)
 	}
 
-	err = common.ExchangeDeclare(exchange, s.channel)
-	if err != nil {
-		log.Errorf("err, exchange declare for send message. Error: %s", err)
+	if err = common.ExchangeDeclare(exchange, s.channel); err != nil {
+		log.Errorf(common.ErrExchangeDeclare, err)
 	}
 
-	err = common.Publish(exchange, routingKey, messByte, s.channel)
-	if err != nil {
-		log.Errorf("err, publish message. Error: %s", err)
+	if err = common.Publish(exchange, routingKey, messByte, s.channel); err != nil {
+		log.Errorf(common.ErrPublish, err)
 	}
-
 }
