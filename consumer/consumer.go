@@ -1,9 +1,11 @@
 package consumer
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/igortk/rabbit-client-library/common"
+	"github.com/igortk/rabbit-client-library/handler"
 	log "github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
 	"time"
@@ -14,92 +16,149 @@ type Consumer struct {
 	connection *amqp.Connection
 	channel    *amqp.Channel
 	queue      *amqp.Queue
+	handler    handler.Handler
 }
 
 func NewConsumer(connection *amqp.Connection) (*Consumer, error) {
-	if channel, err := connection.Channel(); err == nil {
-		return &Consumer{
-			connection: connection,
-			channel:    channel,
-		}, nil
-	} else {
-		return nil, err
-	}
-}
-
-func NewConsumerWithRouts(exchange, routingKey, queueName string, connection *amqp.Connection) (*Consumer, error) {
 	channel, err := connection.Channel()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create channel: %w", err)
+	}
+	return &Consumer{
+		connection: connection,
+		channel:    channel,
+	}, nil
+}
+
+func NewConsumerWithRoutes(
+	exchange, routingKey, queueName string,
+	connection *amqp.Connection,
+	handler handler.Handler,
+) (*Consumer, error) {
+	channel, err := connection.Channel()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create channel: %w", err)
 	}
 
 	consumer := &Consumer{
 		connection: connection,
 		channel:    channel,
+		handler:    handler,
 	}
 
 	if err := common.ExchangeDeclare(exchange, channel); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to declare exchange '%s': %w", exchange, err)
 	}
 
-	if queue, err := common.QueueDeclare(queueName, channel); err == nil {
-		consumer.queue = &queue
-	} else {
-		return nil, err
+	queue, err := common.QueueDeclare(queueName, channel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to declare queue '%s': %w", queueName, err)
 	}
+	consumer.queue = &queue
 
 	if err := common.QueueBind(queueName, routingKey, exchange, channel); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to bind queue '%s' to routing key '%s': %w", queueName, routingKey, err)
 	}
 
 	return consumer, nil
 }
 
-func (c *Consumer) ConsumeMessages(handler func([]byte) error) error {
-	dlv, err := common.ChannelConsume(c.queue.Name, c.channel)
-	if err != nil {
-		return err
+func (c *Consumer) ConsumeMessages(ctx context.Context) error {
+	if c.queue == nil {
+		return errors.New("queue is not initialized")
 	}
 
-	go func() {
-		for mes := range dlv {
-			if err := handler(mes.Body); err != nil {
-				log.Errorf(common.ErrHandlerMessage, err)
+	dlv, err := common.ChannelConsume(c.queue.Name, c.channel)
+	if err != nil {
+		return fmt.Errorf("failed to start consuming messages: %w", err)
+	}
+
+	go func(ctx context.Context) {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("panic recovered in message consumer: %v", r)
+			}
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("message consumer stopped")
+				return
+			case mes, ok := <-dlv:
+				if !ok {
+					log.Warn("delivery channel closed")
+					return
+				}
+				if err := c.handler.HandleMessage(mes.Body); err != nil {
+					log.Errorf("error handling message: %v", err)
+				}
 			}
 		}
-	}()
+	}(ctx)
 
 	return nil
 }
 
 func (c *Consumer) ConsumeWithCondition(
-	queueName, routingKey, exchange string,
+	ctx context.Context,
+	q, rk, ex string,
 	timeout time.Duration,
-	condition func([]byte) bool) ([]byte, error) {
+	condition func([]byte) bool,
+) ([]byte, error) {
+	if _, err := common.QueueDeclare(q, c.channel); err != nil {
+		return nil, fmt.Errorf("failed to declare queue '%s': %w", q, err)
+	}
+	defer c.channel.QueueDelete(q, false, false, false)
 
-	if _, err := common.QueueDeclare(queueName, c.channel); err != nil {
-		return nil, err
+	if err := common.QueueBind(q, rk, ex, c.channel); err != nil {
+		return nil, fmt.Errorf("failed to bind queue '%s': %w", q, err)
 	}
 
-	if err := common.QueueBind(queueName, routingKey, exchange, c.channel); err != nil {
-		return nil, err
-	}
-
-	dlv, err := common.ChannelConsume(queueName, c.channel)
+	dlv, err := common.ChannelConsume(q, c.channel)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to start consuming messages: %w", err)
 	}
 
-	timeoutChan := time.After(timeout * time.Second)
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	for {
 		select {
-		case msg := <-dlv:
-			if condition(msg.Body) {
-				return msg.Body, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+			return nil, errors.New("timeout reached while waiting for condition")
+		case mes, ok := <-dlv:
+			if !ok {
+				return nil, errors.New("delivery channel closed")
 			}
-		case <-timeoutChan:
-			return nil, errors.New(fmt.Sprintf(common.TimeoutException, timeout))
+			if condition(mes.Body) {
+				return mes.Body, nil
+			}
 		}
 	}
+}
+
+func (c *Consumer) AddHandler(h handler.Handler) {
+	c.handler = h
+}
+
+func (c *Consumer) AddRouting(ex, rk, q string, ch *amqp.Channel) error {
+	channel := ch
+
+	if ch == nil {
+		channel = c.channel
+	}
+
+	if queue, err := common.QueueDeclare(q, channel); err == nil {
+		c.queue = &queue
+	} else {
+		return err
+	}
+
+	if err := common.QueueBind(q, rk, ex, channel); err != nil {
+		return err
+	}
+
+	return nil
 }

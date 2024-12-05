@@ -1,10 +1,12 @@
 package consumer
 
 import (
+	"context"
 	"fmt"
 	"github.com/igortk/rabbit-client-library/common"
 	"github.com/stretchr/testify/assert"
 	"testing"
+	"time"
 )
 
 const (
@@ -12,7 +14,7 @@ const (
 	exchangeTest   = "e.test"
 	routingKeyTest = "r.rabbit-client-library.test"
 	queueTest      = "q.rabbit-client-library.test"
-	timeoutTest    = 5
+	timeoutTest    = 10
 )
 
 const (
@@ -24,12 +26,24 @@ const (
 	receivedMessage = "received message"
 )
 
+type funcHandler func(body []byte) error
+
+func (f funcHandler) HandleMessage(body []byte) error {
+	return f(body)
+}
+
 func TestInitConsumer(t *testing.T) {
 	conn, _ := common.Connect(connectUrl)
-	consumer, err := NewConsumerWithRouts(exchangeTest,
+	consumer, err := NewConsumerWithRoutes(exchangeTest,
 		routingKeyTest,
 		queueTest,
-		conn)
+		conn,
+		funcHandler(func(body []byte) error {
+			fmt.Println(receivedMessage)
+			fmt.Println(string(body))
+
+			return nil
+		}))
 
 	assert.NoError(t, err, errIsNotNil)
 	assert.NotNil(t, consumer, consumerIsNil)
@@ -37,13 +51,7 @@ func TestInitConsumer(t *testing.T) {
 	forever := make(chan bool)
 
 	go func() {
-		err = consumer.ConsumeMessages(
-			func(body []byte) error {
-				fmt.Println(receivedMessage)
-				fmt.Println(body)
-
-				return nil
-			})
+		err = consumer.ConsumeMessages(context.Background())
 		if err != nil {
 			fmt.Print(err)
 		}
@@ -59,10 +67,14 @@ func TestConsumerWithCondition(t *testing.T) {
 		fmt.Println(err)
 	}
 
-	mes, err := consumer.ConsumeWithCondition(queueTest,
-		routingKeyTest,
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	mes, err := consumer.ConsumeWithCondition(ctx,
+		queueTest+"condition",
+		routingKeyTest+"condition",
 		exchangeTest,
-		timeoutTest,
+		timeoutTest*time.Second,
 		func(bytes []byte) bool {
 			if bytes != nil {
 				return true
